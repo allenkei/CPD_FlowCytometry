@@ -1,0 +1,13 @@
+ACGH                    Bladder Tumor Micro-Array Data
+DJIA                    Dow Jones Industrial Average Index
+e.agglo                 ENERGY AGGLOMERATIVE
+e.cp3o                  CHANGE POINTS ESTIMATION BY PRUNED OBJECTIVE
+                        (VIA E-STATISTIC)
+e.cp3o_delta            CHANGE POINTS ESTIMATION BY PRUNED OBJECTIVE
+                        (VIA E-STATISTIC)
+e.divisive              ENERGY DIVISIVE
+kcpa                    Kernel Change Point Analysis
+ks.cp3o                 CHANGE POINTS ESTIMATION BY PRUNED OBJECTIVE
+                        (VIA KOLMOGOROV-SMIRNOV STATISTIC)
+ks.cp3o_delta           CHANGE POINTS ESTIMATION BY PRUNED OBJECTIVE
+                        (VIA KOLMOGOROV-SMIRNOV STATISTIC)
