@@ -19,14 +19,14 @@ def parse_args():
     parser.add_argument('--num_samples', default=100, type=int) 
     parser.add_argument('--num_time', default=200, type=int)
     parser.add_argument('--penalties', nargs='+', type=float, default=[0.01,0.1,0.5,1,10,100])
-    parser.add_argument('--epoch', default=20, type=int)
+    parser.add_argument('--epoch', default=50, type=int)
     parser.add_argument('--decoder_lr', default=0.01, type=float)
     parser.add_argument('--langevin_K', default=100, type=int)
     parser.add_argument('--langevin_s', default=0.1, type=float)
     parser.add_argument('--kappa', default=0.1, type=float)
     parser.add_argument('--nu_iteration', default=20, type=int)
     parser.add_argument('--decoder_iteration', default=20, type=int)
-    parser.add_argument('--loss_thr', default=1e-5, type=float)
+    parser.add_argument('--loss_thr', default=1e-10, type=float)
     parser.add_argument('--iter_thr', default=5, type=int)
     parser.add_argument('--true_CP_full', nargs='+', type=int, default=[51,101,151])
     parser.add_argument('--signif_level', default=0.975, type=float)
@@ -181,12 +181,16 @@ def learn_one_seq_penalty(args, x_input_train, y_input_train,
         w = mu - nu + w
 
 
-        loss_relative_diff = torch.abs((loss_train - old_loss_train) / old_loss_train) \
-                             if old_loss_train != -float('inf') else torch.tensor(1.0)
-        old_loss_train = loss_train.clone()
+        if old_loss_train != -float('inf'):
+            loss_relative_diff = abs((loss_train.item() - old_loss_train) / old_loss_train)
+        else:
+            loss_relative_diff = 1.0
+        old_loss_train = loss_train.item()
+
         mu_old = mu.clone()
         nu_old = nu.clone()
-
+        if learn_iter % 1 == 0:
+            print(f"\n[INFO] loss_relative_diff: {loss_relative_diff}")
         if loss_relative_diff < args.loss_thr:
             stopping_count += 1
         else:
@@ -194,7 +198,7 @@ def learn_one_seq_penalty(args, x_input_train, y_input_train,
 
         if stopping_count >= args.iter_thr:
             early_stopping = True
-
+            print(f"\n[INFO] EARLY STOPPING!!!!!!!!!!!!!!!!!!!!!!!!!")
 
         if early_stopping or (learn_iter+1) == args.epoch:
             if half:
