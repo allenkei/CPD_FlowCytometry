@@ -19,7 +19,7 @@ def generate_x(T=200, N=100, dx=3):
     -------
     X : np.ndarray of shape (T, N, dx)
     """
-    return np.random.randn(T, N, dx)+5
+    return np.random.randn(T, N, dx) + 1
 
 
 def generate_data(X, mean_func, sigma_func, change_points=[100], z_means=[0, 5]):
@@ -80,9 +80,9 @@ d = np.random.randn(6)-2
 
 def mean_func(h, z):
     return np.array([
-        1* h @ u + np.tanh(h @ u) + z[0],
-        1*h @ v + np.sin(h @ v) + z[1],
-        1*h @ w + 0.5*(h @ w) - z[2]
+        h @ u + np.tanh(h @ u) + z[0],
+        h @ v + np.sin(h @ v) + z[1],
+        h @ w + 0.5*(h @ w) - z[2]
     ])
 
 def sigma_func(h, z):

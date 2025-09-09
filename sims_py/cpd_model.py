@@ -189,7 +189,7 @@ def learn_one_seq_penalty(args, x_input_train, y_input_train,
 
         mu_old = mu.clone()
         nu_old = nu.clone()
-        if learn_iter % 1 == 0:
+        if learn_iter % 10 == 0:
             print(f"\n[INFO] loss_relative_diff: {loss_relative_diff}")
         if loss_relative_diff < args.loss_thr:
             stopping_count += 1
