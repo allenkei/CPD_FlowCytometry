@@ -106,7 +106,7 @@ def learn_one_seq_penalty(args, x_input_train, y_input_train,
     d = args.z_dim
     T = x_input_train.shape[0] // args.num_samples   
 
-    print(f"\n[INFO] Penalty {penalty}")
+    # print(f"\n[INFO] Penalty {penalty}")
 
 
     dev = x_input_train.device
@@ -190,7 +190,8 @@ def learn_one_seq_penalty(args, x_input_train, y_input_train,
         mu_old = mu.clone()
         nu_old = nu.clone()
         if learn_iter % 10 == 0:
-            print(f"\n[INFO] loss_relative_diff: {loss_relative_diff}")
+            pass
+            # print(f"\n[INFO] loss_relative_diff: {loss_relative_diff}")
         if loss_relative_diff < args.loss_thr:
             stopping_count += 1
         else:
@@ -198,7 +199,7 @@ def learn_one_seq_penalty(args, x_input_train, y_input_train,
 
         if stopping_count >= args.iter_thr:
             early_stopping = True
-            print(f"\n[INFO] EARLY STOPPING!!!!!!!!!!!!!!!!!!!!!!!!!")
+            # print(f"\n[INFO] EARLY STOPPING!!!!!!!!!!!!!!!!!!!!!!!!!")
 
         if early_stopping or (learn_iter+1) == args.epoch:
             if half:

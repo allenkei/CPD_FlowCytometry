@@ -152,3 +152,4 @@ final_results <- full_results %>%
   summarise(across(everything(), mean, na.rm = TRUE))
 
 print(final_results)
+
