@@ -2,9 +2,16 @@ import numpy as np
 import pandas as pd
 import os
 
+import numpy as np
+
 def generate_x(T=200, N=100, dx=3):
     """
-    Generate covariates X ~ N(0, I).
+    Generate covariates X with structured temporal patterns:
+      - Every 3 dimensions form one group:
+        (1) increasing,
+        (2) decreasing,
+        (3) wavelet (sinusoidal)
+    Each group is repeated floor(dx/3) times, extra dims are random normal.
 
     Parameters
     ----------
@@ -19,7 +26,29 @@ def generate_x(T=200, N=100, dx=3):
     -------
     X : np.ndarray of shape (T, N, dx)
     """
-    return np.random.randn(T, N, dx) + 1
+    t = np.linspace(0, 1, T)
+    n_groups = dx // 3
+    X = np.zeros((T, N, dx))
+
+    for g in range(n_groups):
+        # (1) increasing
+        inc = t[:, None] + 0.1 * np.random.randn(T, N)
+        # (2) decreasing
+        dec = (1 - t)[:, None] + 0.1 * np.random.randn(T, N)
+        # (3) wavelet (simple sine wave)
+        wave = np.sin(4 * np.pi * t)[:, None] + 0.1 * np.random.randn(T, N)
+
+        X[:, :, 3*g + 0] = inc
+        X[:, :, 3*g + 1] = dec
+        X[:, :, 3*g + 2] = wave
+
+    # If dx not multiple of 3, fill remaining dims with random noise
+    rem = dx % 3
+    if rem > 0:
+        X[:, :, -rem:] = np.random.randn(T, N, rem)
+
+    return X
+
 
 
 def generate_data(X, mean_func, sigma_func, change_points=[100], z_means=[0, 5]):

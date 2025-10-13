@@ -235,7 +235,7 @@ def evaluation(delta_mu, args):
             est_CP.remove(to_remove)
         else:
             end_i += 1
-    est_CP = [cp+2 for cp in est_CP]
+    est_CP = [cp+1 for cp in est_CP]
 
     # metrics
     num_CP = len(est_CP)
@@ -259,7 +259,7 @@ def evaluation(delta_mu, args):
 
     # plot
     fig, ax = plt.subplots(figsize=(16,4))
-    ax.plot(np.arange(2, T+1), t_change, label="Δμ", color="#172478")
+    ax.plot(np.arange(1, T), t_change, label="Δμ", color="#172478")
     for cp in est_CP: ax.axvline(x=cp, color="#B8860B", linestyle="--", lw=2.5, label="Estimated CP")
     for cp in true_CP: ax.axvline(x=cp, color="red", linestyle="-", lw=1, label="True CP")
     ax.axhline(y=threshold, color="#9467bd", linestyle="--", lw=1.5, alpha=0.8, label="Threshold")
