@@ -198,15 +198,15 @@ def learn_one_seq_penalty(args, x_input_train, y_input_train,
             delta_mu_list.append(delta_mu)
 
         # === print progress ===
-        # if (learn_iter + 1) % 5 == 0 or learn_iter == args.epoch - 1:
-        #     avg_delta = np.mean(delta_mu_list, axis=0) if delta_mu_list else delta_mu
-        #     res = evaluation(avg_delta, args)
-        #     acc = res[3]
-        #     print(
-        #         f"Epoch {learn_iter+1:3d} | Loss={loss_train.item():.6f} "
-        #         f"| Accuracy={acc:.4f} | Averaged={(learn_iter+1>burn_in)}",
-        #         flush=True,
-        #     )
+        if (learn_iter + 1) % 5 == 0 or learn_iter == args.epoch - 1:
+            avg_delta = np.mean(delta_mu_list, axis=0) if delta_mu_list else delta_mu
+            res = evaluation(avg_delta, args)
+            acc = res[3]
+            print(
+                f"Epoch {learn_iter+1:3d} | Loss={loss_train.item():.6f} "
+                f"| Accuracy={acc:.4f} | Averaged={(learn_iter+1>burn_in)}",
+                flush=True,
+            )
 
     # === Final evaluation ===
     avg_delta = np.mean(delta_mu_list, axis=0) if delta_mu_list else delta_mu
@@ -216,7 +216,7 @@ def learn_one_seq_penalty(args, x_input_train, y_input_train,
     else:
         return evaluation(avg_delta, args)
     
-    return evaluation(avg_delta, args)
+
 
 
 
@@ -311,3 +311,128 @@ def init_weights(m):
         nn.init.uniform_(m.weight, -0.05, 0.05)
         if m.bias is not None:
             nn.init.uniform_(m.bias, -0.05, 0.05)
+
+
+def learn_one_seq_qi(args, x_input_train, y_input_train,
+                          x_input_test, y_input_test, penalty, half):
+    """
+    One sequence learning with given penalty.
+    Inputs are expected to be torch tensors already moved to CPU/GPU.
+    Implements burn-in + averaging Δμ after convergence.
+    """
+    m = args.num_samples
+    kappa = args.kappa
+    d = args.z_dim
+    T = x_input_train.shape[0] // args.num_samples
+    dev = x_input_train.device
+
+    # === y-scaling statistics ===
+    y_mean = y_input_train.mean(dim=0) if args.scale_y else None
+    y_std = y_input_train.std(dim=0) + 1e-8 if args.scale_y else None
+
+    ones_col = torch.ones(T, 1, device=dev)
+    X = torch.zeros(T, T - 1, device=dev)
+    i, j = torch.tril_indices(T, T - 1, offset=-1)
+    X[i, j] = 1  # Group Fused Lasso design
+
+    mu = torch.zeros(T, d, device=dev)
+    nu = torch.zeros(T, d, device=dev)
+    w = torch.zeros(T, d, device=dev)
+
+    model = CPD(args, half=False).to(dev)
+    model.apply(init_weights)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.decoder_lr)
+
+    old_loss_train = -float("inf")
+
+    # === burn-in + averaging ===
+    burn_in = max(10, args.epoch // 2) 
+    delta_mu_list = []
+
+    for learn_iter in range(args.epoch):
+
+        mu_repeat = mu.repeat_interleave(m, dim=0)
+        init_z = torch.randn(T * m, d, device=dev)
+        sampled_z_all = model.infer_z(
+            x_input_train, init_z, y_input_train, mu_repeat, args, y_mean, y_std
+        )
+
+        expected_z = sampled_z_all.clone().reshape(T, m, d).mean(dim=1)
+        mu = (expected_z + kappa * (nu - w)) / (1.0 + kappa)
+        mu = mu.detach().clone()
+
+        for _ in range(args.decoder_iteration):
+            optimizer.zero_grad()
+            pi, mean, sigma = model(x_input_train, sampled_z_all)
+            loss_train = mixture_of_gaussians_loss(
+                y_input_train, pi, mean, sigma, y_mean, y_std
+            ) / m
+            loss_train.backward()
+            nn.utils.clip_grad_norm_(model.parameters(), 1)
+            optimizer.step()
+
+        # === ADMM updates ===
+        gamma = nu[0, :].unsqueeze(0)
+        beta = torch.diff(nu, dim=0)
+
+        for _ in range(args.nu_iteration):
+            for t in range(T - 1):
+                beta_without_t = beta.clone()
+                X_without_t = X.clone()
+                beta_without_t[t, :] = 0
+                X_without_t[:, t] = 0
+
+                bt = kappa * torch.mm(
+                    X[:, t].unsqueeze(0),
+                    mu + w - torch.mm(ones_col, gamma) - torch.mm(X_without_t, beta_without_t),
+                )
+                bt_norm = torch.norm(bt, p=2)
+
+                if bt_norm < penalty:
+                    beta[t, :] = 0
+                else:
+                    beta[t, :] = (
+                        1 / (kappa * torch.norm(X[:, t], p=2) ** 2)
+                    ) * (1 - penalty / bt_norm) * bt
+
+            gamma = torch.mean(mu + w - torch.mm(X, beta), dim=0).unsqueeze(0)
+
+        nu = torch.mm(ones_col, gamma) + torch.mm(X, beta)
+        w = mu - nu + w
+
+        # === Δμ accumulation ===
+        delta_mu = torch.norm(torch.diff(mu, dim=0), p=2, dim=1).cpu().numpy()
+        if learn_iter + 1 > burn_in:
+            delta_mu_list.append(delta_mu)
+
+        # === print progress ===
+        if (learn_iter + 1) % 5 == 0 or learn_iter == args.epoch - 1:
+            avg_delta = np.mean(delta_mu_list, axis=0) if delta_mu_list else delta_mu
+            res = evaluation(avg_delta, args)
+            acc = res[3]
+            print(
+                f"Epoch {learn_iter+1:3d} | Loss={loss_train.item():.6f} "
+                f"| Accuracy={acc:.4f} | Averaged={(learn_iter+1>burn_in)}",
+                flush=True,
+            )
+
+    # === Final evaluation ===
+    avg_delta = np.mean(delta_mu_list, axis=0) if delta_mu_list else delta_mu
+    
+    if half:
+        # === Compute Δμ & detect CPs ===
+        avg_delta = np.mean(delta_mu_list, axis=0) if delta_mu_list else delta_mu
+        _, _, _, _, _, est_CP, _ = evaluation(avg_delta, args)
+        
+        # === Compute pseudo-BIC ===
+        num_segments = len(est_CP) + 1
+        T = args.num_time // 2 if half else args.num_time
+        Dz = args.z_dim
+
+        nll_val = loss_train.item() * args.num_samples  # convert mean loss back to total NLL
+        bic_val = 2 * nll_val + num_segments * Dz * np.log(T)
+
+        return bic_val, penalty
+
+    else:
+        return evaluation(avg_delta, args)

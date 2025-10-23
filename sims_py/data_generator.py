@@ -57,7 +57,7 @@ def softmax(z):
 def generate_gmm_data_segments(
     X, mean_funcs_list, weight_funcs_list,
     change_points=[51, 101, 151], K=3, dy=3,
-    mean_jitter=0.05, cov_scale=0.5
+    mean_jitter=0.05, cov_scale=1
 ):
     """
     Generate time-series data with segment-specific GMM structure (reduced noise).

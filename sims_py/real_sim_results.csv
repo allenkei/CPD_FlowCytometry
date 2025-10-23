@@ -1,0 +1,2 @@
+rep_id,best_penalty,covering_metric,detected_CPs,abs_error,dist_est_gt,dist_gt_est
+0,0.1,0.512922887922888,"[8, 21, 40, 105, 111, 156, 166, 175, 215, 239]",7,11,88
