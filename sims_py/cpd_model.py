@@ -105,13 +105,120 @@ class CPD(nn.Module):
 ##################
 # TRAINING LOGIC #
 ##################
+# This is for using aggregated delta mu
+# def learn_one_seq_penalty(args, x_input_train, y_input_train,
+#                           x_input_test, y_input_test, penalty, half):
+#     """
+#     One sequence learning with given penalty.
+#     Implements CV when half=True: train on train set, evaluate on test set.
+#     """
+#     m = args.num_samples
+#     kappa = args.kappa
+#     d = args.z_dim
+#     T = x_input_train.shape[0] // args.num_samples
+#     dev = x_input_train.device
+
+#     # === y-scaling statistics ===
+#     y_mean = y_input_train.mean(dim=0) if args.scale_y else None
+#     y_std = y_input_train.std(dim=0) + 1e-8 if args.scale_y else None
+
+#     ones_col = torch.ones(T, 1, device=dev)
+#     X = torch.zeros(T, T - 1, device=dev)
+#     i, j = torch.tril_indices(T, T - 1, offset=-1)
+#     X[i, j] = 1  # Group Fused Lasso design
+
+#     mu = torch.zeros(T, d, device=dev)
+#     nu = torch.zeros(T, d, device=dev)
+#     w = torch.zeros(T, d, device=dev)
+
+#     model = CPD(args, half=False).to(dev)
+#     model.apply(init_weights)
+#     optimizer = torch.optim.Adam(model.parameters(), lr=args.decoder_lr)
+
+#     # === burn-in setup ===
+#     burn_in = max(10, args.epoch // 2) 
+#     delta_mu_list = []
+
+#     for learn_iter in range(args.epoch):
+
+#         mu_repeat = mu.repeat_interleave(m, dim=0)
+#         init_z = torch.randn(T * m, d, device=dev)
+#         sampled_z_all = model.infer_z(
+#             x_input_train, init_z, y_input_train, mu_repeat, args, y_mean, y_std
+#         )
+
+#         expected_z = sampled_z_all.clone().reshape(T, m, d).mean(dim=1)
+#         mu = (expected_z + kappa * (nu - w)) / (1.0 + kappa)
+#         mu = mu.detach().clone()
+
+#         for _ in range(args.decoder_iteration):
+#             optimizer.zero_grad()
+#             pi, mean, sigma = model(x_input_train, sampled_z_all)
+#             loss_train = mixture_of_gaussians_loss(
+#                 y_input_train, pi, mean, sigma, y_mean, y_std
+#             ) / m
+#             loss_train.backward()
+#             nn.utils.clip_grad_norm_(model.parameters(), 1)
+#             optimizer.step()
+
+#         # === ADMM updates ===
+#         gamma = nu[0, :].unsqueeze(0)
+#         beta = torch.diff(nu, dim=0)
+#         for _ in range(args.nu_iteration):
+#             for t in range(T - 1):
+#                 beta_without_t = beta.clone()
+#                 X_without_t = X.clone()
+#                 beta_without_t[t, :] = 0
+#                 X_without_t[:, t] = 0
+#                 bt = kappa * torch.mm(
+#                     X[:, t].unsqueeze(0),
+#                     mu + w - torch.mm(ones_col, gamma) - torch.mm(X_without_t, beta_without_t),
+#                 )
+#                 bt_norm = torch.norm(bt, p=2)
+#                 if bt_norm < penalty:
+#                     beta[t, :] = 0
+#                 else:
+#                     beta[t, :] = (
+#                         1 / (kappa * torch.norm(X[:, t], p=2) ** 2)
+#                     ) * (1 - penalty / bt_norm) * bt
+#             gamma = torch.mean(mu + w - torch.mm(X, beta), dim=0).unsqueeze(0)
+
+#         nu = torch.mm(ones_col, gamma) + torch.mm(X, beta)
+#         w = mu - nu + w
+
+#         # === Δμ accumulation ===
+#         delta_mu = torch.norm(torch.diff(mu, dim=0), p=2, dim=1).cpu().numpy()
+#         if learn_iter + 1 > burn_in:
+#             delta_mu_list.append(delta_mu)
+
+#     # === After training, evaluate on test data ===
+#     if half:
+#         with torch.no_grad():
+#             T_test = x_input_test.shape[0] // args.num_samples
+#             mu_repeat_test = mu[:T_test].repeat_interleave(m, dim=0)
+#             z_test_init = torch.randn(T_test * m, d, device=dev)
+#             sampled_z_test = model.infer_z(
+#                 x_input_test, z_test_init, y_input_test, mu_repeat_test, args, y_mean, y_std
+#             )
+#             pi_test, mean_test, sigma_test = model(x_input_test, sampled_z_test)
+#             val_loss = mixture_of_gaussians_loss(
+#                 y_input_test, pi_test, mean_test, sigma_test, y_mean, y_std
+#             ) / m
+#         return val_loss.item(), penalty
+
+#     # === Final full-sequence evaluation ===
+#     avg_delta = np.mean(delta_mu_list, axis=0) if delta_mu_list else delta_mu
+#     return evaluation(avg_delta, args)
+
+# This is for using SNR for delta mu and return the best one
 def learn_one_seq_penalty(args, x_input_train, y_input_train,
-                          x_input_test, y_input_test, penalty, half):
+                     x_input_test, y_input_test, penalty, half):
     """
     One sequence learning with given penalty.
-    Inputs are expected to be torch tensors already moved to CPU/GPU.
-    Implements burn-in + averaging Δμ after convergence.
+    - half=True : cross-validation (for λ selection) — return training loss only
+    - half=False: full training (for final model) — record Δμ & SNR, select epoch with minimal SNR
     """
+
     m = args.num_samples
     kappa = args.kappa
     d = args.z_dim
@@ -135,11 +242,7 @@ def learn_one_seq_penalty(args, x_input_train, y_input_train,
     model.apply(init_weights)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.decoder_lr)
 
-    old_loss_train = -float("inf")
-
-    # === burn-in + averaging ===
-    burn_in = max(10, args.epoch // 2) 
-    delta_mu_list = []
+    delta_mu_all, snr_list = [], []
 
     for learn_iter in range(args.epoch):
 
@@ -153,6 +256,7 @@ def learn_one_seq_penalty(args, x_input_train, y_input_train,
         mu = (expected_z + kappa * (nu - w)) / (1.0 + kappa)
         mu = mu.detach().clone()
 
+        # === Decoder training ===
         for _ in range(args.decoder_iteration):
             optimizer.zero_grad()
             pi, mean, sigma = model(x_input_train, sampled_z_all)
@@ -173,49 +277,55 @@ def learn_one_seq_penalty(args, x_input_train, y_input_train,
                 X_without_t = X.clone()
                 beta_without_t[t, :] = 0
                 X_without_t[:, t] = 0
-
                 bt = kappa * torch.mm(
                     X[:, t].unsqueeze(0),
                     mu + w - torch.mm(ones_col, gamma) - torch.mm(X_without_t, beta_without_t),
                 )
                 bt_norm = torch.norm(bt, p=2)
-
                 if bt_norm < penalty:
                     beta[t, :] = 0
                 else:
                     beta[t, :] = (
                         1 / (kappa * torch.norm(X[:, t], p=2) ** 2)
                     ) * (1 - penalty / bt_norm) * bt
-
             gamma = torch.mean(mu + w - torch.mm(X, beta), dim=0).unsqueeze(0)
 
         nu = torch.mm(ones_col, gamma) + torch.mm(X, beta)
         w = mu - nu + w
 
-        # === Δμ accumulation ===
+        # === Δμ & SNR ===
         delta_mu = torch.norm(torch.diff(mu, dim=0), p=2, dim=1).cpu().numpy()
-        if learn_iter + 1 > burn_in:
-            delta_mu_list.append(delta_mu)
 
-        # === print progress ===
-        if (learn_iter + 1) % 5 == 0 or learn_iter == args.epoch - 1:
-            avg_delta = np.mean(delta_mu_list, axis=0) if delta_mu_list else delta_mu
-            res = evaluation(avg_delta, args)
-            acc = res[3]
-            print(
-                f"Epoch {learn_iter+1:3d} | Loss={loss_train.item():.6f} "
-                f"| Accuracy={acc:.4f} | Averaged={(learn_iter+1>burn_in)}",
-                flush=True,
-            )
+        if not half:
+            mean_val = np.mean(delta_mu)
+            var_val = np.var(delta_mu) + 1e-8
+            snr = mean_val / var_val
+            snr_list.append(snr)
+            delta_mu_all.append(delta_mu)
 
-    # === Final evaluation ===
-    avg_delta = np.mean(delta_mu_list, axis=0) if delta_mu_list else delta_mu
-    
+            if (learn_iter + 1) % 5 == 0 or learn_iter == args.epoch - 1:
+                print(f"Epoch {learn_iter+1:3d} | Loss={loss_train.item():.6f} | SNR={snr:.6f}",
+                      flush=True)
+        else:
+            # for CV only print loss
+            if (learn_iter + 1) % 5 == 0 or learn_iter == args.epoch - 1:
+                print(f"Epoch {learn_iter+1:3d} | Loss={loss_train.item():.6f}", flush=True)
+
+    # === CV stage ===
     if half:
         return loss_train.item(), penalty
-    else:
-        return evaluation(avg_delta, args)
-    
+
+    # === Full-data stage ===
+    best_idx = int(np.argmin(snr_list))
+    best_snr = snr_list[best_idx]
+    best_delta_mu = delta_mu_all[best_idx]
+
+    print(f"\n[SNR-based model selection] Best epoch = {best_idx+1}, SNR = {best_snr:.6f}\n")
+
+    result = evaluation(best_delta_mu, args)
+    return result, snr_list, delta_mu_all
+
+
 
 
 
