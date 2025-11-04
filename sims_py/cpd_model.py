@@ -212,8 +212,12 @@ def learn_one_seq_penalty(args, x_input_train, y_input_train,
                      x_input_test, y_input_test, penalty, half):
     """
     One sequence learning with given penalty.
-    - half=True : cross-validation (for λ selection) — return training loss only
-    - half=False: full training (for final model) — record Δμ & SNR, select epoch with minimal SNR
+    - half=True : cross-validation (for λ selection)
+        Train on train set; record kurtosis each epoch;
+        pick epoch with max kurtosis and compute test LLH
+        using mu as z (no re-inference).
+    - half=False: full training (for final model)
+        Select epoch with max kurtosis and evaluate Δμ.
     """
 
     m = args.num_samples
@@ -239,7 +243,7 @@ def learn_one_seq_penalty(args, x_input_train, y_input_train,
     model.apply(init_weights)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.decoder_lr)
 
-    delta_mu_all, snr_list = [], []
+    delta_mu_all, kurt_list, mu_all = [], [], []
 
     for learn_iter in range(args.epoch):
 
@@ -290,37 +294,48 @@ def learn_one_seq_penalty(args, x_input_train, y_input_train,
         nu = torch.mm(ones_col, gamma) + torch.mm(X, beta)
         w = mu - nu + w
 
-        # === Δμ & SNR ===
+        # === Δμ & kurtosis ===
         delta_mu = torch.norm(torch.diff(mu, dim=0), p=2, dim=1).cpu().numpy()
+        mean_val = np.mean(delta_mu)
+        var_val = np.var(delta_mu) + 1e-8
+        kurt = np.mean((delta_mu - mean_val)**4) / (var_val**2)
 
-        if not half:
-            mean_val = np.mean(delta_mu)
-            var_val = np.var(delta_mu) + 1e-8
-            snr = mean_val / var_val
-            snr_list.append(snr)
-            delta_mu_all.append(delta_mu)
+        kurt_list.append(kurt)
+        mu_all.append(mu.clone().detach()) 
+        delta_mu_all.append(delta_mu)
 
-            if (learn_iter + 1) % 5 == 0 or learn_iter == args.epoch - 1:
-                print(f"Epoch {learn_iter+1:3d} | Loss={loss_train.item():.6f} | SNR={snr:.6f}",
-                      flush=True)
-        else:
-            # for CV only print loss
-            if (learn_iter + 1) % 5 == 0 or learn_iter == args.epoch - 1:
-                print(f"Epoch {learn_iter+1:3d} | Loss={loss_train.item():.6f}", flush=True)
+        if (learn_iter + 1) % 5 == 0 or learn_iter == args.epoch - 1:
+            print(f"Epoch {learn_iter+1:3d} | Loss={loss_train.item():.6f} | Kurtosis={kurt:.6f}",
+                  flush=True)
 
     # === CV stage ===
     if half:
-        return loss_train.item(), penalty
+        best_idx = int(np.argmax(kurt_list))
+        best_mu = mu_all[best_idx]
+
+        # --- use mu as z, directly compute test LLH ---
+        z_test = best_mu.repeat_interleave(m, dim=0)  # no inference
+        with torch.no_grad():
+            pi_test, mean_test, sigma_test = model(x_input_test, z_test)
+            val_loss = mixture_of_gaussians_loss(
+                y_input_test, pi_test, mean_test, sigma_test, y_mean, y_std
+            ) / m
+
+        print(f"[CV] Best epoch = {best_idx+1}, Kurtosis = {kurt_list[best_idx]:.6f}, "
+              f"Val Loss = {val_loss.item():.6f}")
+        return val_loss.item(), penalty
 
     # === Full-data stage ===
-    best_idx = int(np.argmin(snr_list))
-    best_snr = snr_list[best_idx]
+    best_idx = int(np.argmax(kurt_list))
+    best_kurt = kurt_list[best_idx]
     best_delta_mu = delta_mu_all[best_idx]
 
-    print(f"\n[SNR-based model selection] Best epoch = {best_idx+1}, SNR = {best_snr:.6f}\n")
+    print(f"\n[Kurtosis-based model selection] Best epoch = {best_idx+1}, Kurtosis = {best_kurt:.6f}\n")
 
     result = evaluation(best_delta_mu, args)
-    return result, snr_list, delta_mu_all
+    return result, kurt_list, delta_mu_all
+
+
 
 
 
