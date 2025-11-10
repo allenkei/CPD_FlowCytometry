@@ -1,0 +1,189 @@
+---
+title: "Generating synthetic data from real covariates"
+author: "Qi, Allen, Paul, Sangwon"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+library(MASS) 
+library(assertthat) 
+library(lubridate)
+library(tidyverse)
+```
+
+## Helpers
+
+```{r}
+get_mixture_full_dim <- function(tt, nt, mn_array, pimat, sigmalist) {
+  dimdat   <- dim(mn_array)[2]
+  numclust <- dim(mn_array)[3]
+  
+  prob <- pimat[tt, ]
+  prob <- prob / sum(prob)
+  draws <- sample(1:numclust, size = nt, replace = TRUE, prob = prob)
+  
+  dat_list <- list()
+  for (iclust in 1:numclust) {
+    ntk <- sum(draws == iclust)
+    if (ntk == 0) next
+    mu_k <- mn_array[tt, , iclust]
+    Sigma_k <- sigmalist[[iclust]]
+    dat_list[[iclust]] <- cbind(
+      MASS::mvrnorm(ntk, mu = mu_k, Sigma = Sigma_k),
+      membership = rep(iclust, ntk)
+    )
+  }
+  do.call(rbind, dat_list)
+}
+
+
+#' Makes 1d plot of data.
+#'
+#' @param ylist Data. A list of (|nt| by |dimdat|) matrices
+plot_1d_data <- function(ylist){
+
+  times = 1:length(ylist)
+  dimdat = ncol(ylist[[1]])
+  assertthat::assert_that(dimdat == 1)
+
+  ## Make a dummy countslist
+  countslist = lapply(ylist, function(y) rep(1, nrow(y)))
+
+  ## Make data into long matrix
+  ymat <- lapply(1:length(ylist), FUN = function(tt){
+    data.frame(time = times[tt], Y = ylist[[tt]], counts = countslist[[tt]])
+  }) %>% bind_rows() %>% as_tibble()
+  colnames(ymat) = c("time", "Y", "counts") 
+  gg = ymat %>% ggplot() +
+    geom_point(aes(x = time, y = Y), alpha = .1) +
+    theme_bw() + ylab("Data") + xlab("Time") 
+  return(gg)
+}
+```
+
+# Code for producing cluster parameters
+
+```{r, fig.width = 7, fig.height = 3}
+## Read in data
+datobj = readRDS("C:/Users/Qi/Downloads/MGL1704-hourly-paper-new.RDS") ## change this to the file you have. We're only using the X object anyway.
+colnames(datobj$X)
+
+
+## Section 1 and 2 and 3
+sec2_inds = c(101:200)
+sec13_inds = c(1:100, 201:296)
+
+## Form covariates
+x = datobj$X %>% as_tibble(rownames = "time") %>% select(time,p1, sss)  %>% mutate(time = lubridate::as_datetime(time))
+tibble(x) %>% pivot_longer(-time) %>% ggplot() +
+  geom_point(aes(x=time, y = value, col = name, group = name)) +
+  geom_line(aes(x=time, y = value, col = name, group = name)) +
+  scale_x_datetime(date_breaks = "1 day")  +
+  theme(axis.text.x=element_text(angle=60, hjust=1))
+TT = nrow(x)
+Xa = cbind(rep(1, TT), x %>% select(-time)) %>% as.matrix()
+```
+
+
+```{r, fig.width = 7, fig.height = 10}
+## Also define alphas in section 1,3
+alpha1 = c(1, 0, 0) ## +10
+alpha2 = c(0, 0, .5) ##+10
+pimat13 = cbind(exp(Xa %*% cbind(alpha1)), (exp(Xa %*% cbind(alpha2))))
+pimat13 = pimat13/rowSums(pimat13)
+
+## Define alphas in section 2
+alpha1 = c(2, 0, 0) ## +10
+alpha2 = c(0, 0, 0) ##+10
+pimat2 = cbind(exp(Xa %*% cbind(alpha1)), (exp(Xa %*% cbind(alpha2))))
+pimat2 = pimat2/rowSums(pimat2)
+
+pimat = pimat13
+pimat[sec2_inds,] = pimat2[sec2_inds,]
+
+########################
+## For dimension 1,2 ### 
+########################
+## Define means in section 1,3
+gap = 3
+beta1 = c(0,1,0)
+beta2 = c(gap,5,0)
+beta3 = c(-4,0,0)
+betalist = list(beta1, beta2)
+mn1 = Xa %*% beta1
+mn2 = Xa %*% beta2
+mnlist13 = list(mn1, mn2)
+mnmat13 = mnlist13 %>% do.call(cbind,.) 
+
+## Define means in section 2
+beta1 = c(0,1,0)
+beta2 = c(gap,0,0)
+betalist = list(beta1, beta2)
+mn1 = Xa %*% beta1
+mn2 = Xa %*% beta2
+mnlist2 = list(mn1, mn2)
+mnmat2 = mnlist2 %>% do.call(cbind,.) 
+
+mnmat_dim12 = mnmat13
+mnmat_dim12[sec2_inds,] = mnmat2[sec2_inds,]
+
+######################
+## For dimension 3 ### 
+######################
+
+## Define means in section 3
+beta1 = c(0,0,-.5)
+beta2 = c(6,0,.5)
+betalist = list(beta1, beta2)
+mn1 = Xa %*% beta1
+mn2 = Xa %*% beta2
+mnlist_dim3 = list(mn1, mn2)
+mnmat_dim3 = mnlist_dim3 %>% do.call(cbind,.) 
+
+## Put it together in three dimensions
+dimdat = 3
+numclust = 2
+mn_array = array(dim = c(TT, dimdat, numclust))
+idim = 1
+mn_array[,1,] = mnmat_dim12
+mn_array[,2,] = mnmat_dim12
+mn_array[,3,] = mnmat_dim3
+
+
+## Plot the parameters
+par(mfrow = c(3,1), mar = c(4,2,4,1))
+matplot(pimat, type = 'p', cex = .5, main = "Cluster probabilities", xlab = "time", ylab = "", ylim = c(0,1))
+abline(v=c(100,200), lty = 2)
+abline(h=c(0,1), lty = 3)
+matplot(sec13_inds, mnmat13[sec13_inds,], type='p', cex = .5, main = "Cluster means in dim1&2", xlab = "time", ylab = "")
+matpoints(sec2_inds, mnmat2[sec2_inds,], type='p', cex = .5)
+abline(v=c(100,200), lty = 2)
+matplot(sec13_inds, mnmat_dim3[sec13_inds,], type='p', cex = .5, main = "Cluster means in dim3", xlab = "time", ylab = "")
+matpoints(sec2_inds, mnmat_dim3[sec2_inds,], type='p', cex = .5)
+abline(v=c(100,200), lty = 2)
+
+## Save
+
+# saveRDS(mn_array, file = file.path("C:/Users/Qi/CPD_FlowCytometry/sims_py/mn_array.RDS"))
+# saveRDS(pimat, file = file.path("C:/Users/Qi/CPD_FlowCytometry/sims_py/pimat.RDS"))
+
+```
+
+```{r}
+Y_arr <- array(NA, c(dim(mn_array)[1],100,dim(mn_array)[2]+1) )
+sig = 0.5
+for (tt in 1:dim(mn_array)[1]) {
+  for (i in 1:100) {
+    clusterid <- sample(1:2, 1, replace = TRUE, prob = pimat[tt,])
+    Y_arr[tt, i, 1:3] <- mvtnorm::rmvnorm(1, mean = mn_array[tt,,clusterid], sigma = diag(sig, 3))
+    Y_arr[tt, i, 4] <- clusterid
+  }
+}
+dimnames(Y_arr) <- NULL
+saveRDS(Y_arr, file = "C:/Users/Qi/CPD_FlowCytometry/sims_py/sim_dat_ult.RDS")
+saveRDS(Xa, file = "C:/Users/Qi/CPD_FlowCytometry/sims_py/sim_x_ult.RDS")
+
+```
+

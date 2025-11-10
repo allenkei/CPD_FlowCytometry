@@ -355,6 +355,7 @@ def evaluation(delta_mu, args):
     tau = len(delta_mu)
     true_CP = getattr(args, "true_CP_full", [])
 
+    # ---- Threshold definition ----
     if getattr(args, "scale_delta", True):
         t_change = (delta_mu - torch.median(delta_mu)) / (torch.std(delta_mu) + 1e-8)
         threshold = torch.mean(t_change) + torch.tensor(st.norm.ppf(args.signif_level)) * torch.std(t_change)
@@ -364,19 +365,18 @@ def evaluation(delta_mu, args):
         threshold = torch.mean(t_change) + torch.tensor(st.norm.ppf(args.signif_level)) * torch.std(t_change)
         label_text = "Δμ (raw)"
 
-
+    # ---- Step 1: candidate CP detection ----
     est_CP = []
     for i in range(len(t_change)):
-
-        if t_change[i] > threshold and 5 <= i <= len(t_change) - 5:
+        if t_change[i] > threshold and 20 <= i <= len(t_change) - 20:
             est_CP.append(i)
 
-
+    # ---- Step 2: merge nearby CPs ----
+    min_gap = 20   
     end_i = 1
     while end_i < len(est_CP):
         prev, this = est_CP[end_i - 1], est_CP[end_i]
-        if this - prev <= 5:
-
+        if this - prev <= min_gap:
             selection = [prev, this]
             to_remove = selection[torch.argmin(delta_mu[selection])]
             est_CP.remove(to_remove)
@@ -384,6 +384,7 @@ def evaluation(delta_mu, args):
             end_i += 1
     est_CP = [cp + 1 for cp in est_CP]
 
+    # ---- Step 3: evaluation metrics ----
     num_CP = len(est_CP)
     if num_CP == 0:
         dist_est_gt, dist_gt_est, covering_metric = float("inf"), float("-inf"), 0
@@ -405,7 +406,7 @@ def evaluation(delta_mu, args):
 
     abs_error = abs(num_CP - len(true_CP))
 
-
+    # ---- Step 4: plotting ----
     fig, ax = plt.subplots(figsize=(16, 4))
     ax.plot(np.arange(1, T), t_change, label=label_text, color="#172478")
     for cp in est_CP:
@@ -416,11 +417,11 @@ def evaluation(delta_mu, args):
 
     ax.set_title(f"Change Point Detection ({label_text})")
     handles, labels_leg = ax.get_legend_handles_labels()
-
     uniq = dict(zip(labels_leg, handles))
     ax.legend(uniq.values(), uniq.keys(), loc="upper right")
 
     return abs_error, dist_est_gt, dist_gt_est, covering_metric, threshold.item(), est_CP, fig
+
 
 
 
