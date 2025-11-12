@@ -39,25 +39,21 @@ def parse_args():
 ##################
 # LOSS FUNCTION  #
 ##################
-def mixture_of_gaussians_loss(y, pi, mean, sigma, y_mean=None, y_std=None):
-    """
-    If y_mean and y_std are provided, standardize y, mean, sigma before loss computation.
-    """
-    if y_mean is not None and y_std is not None:
-        y = (y - y_mean) / (y_std + 1e-8)
-        mean = (mean - y_mean.unsqueeze(1)) / (y_std.unsqueeze(1) + 1e-8)
-        sigma = sigma / (y_std.unsqueeze(1)**2 + 1e-8)
-
+def mixture_of_gaussians_loss(y, pi, mean, sigma):
     N, K, D = mean.shape
-    y_expand = y.unsqueeze(1).expand(-1, K, -1)
-    diff = y_expand - mean
-    mahal = torch.sum((diff**2) / (sigma + 1e-8), dim=2)
+    y_expand = y.unsqueeze(1).expand(-1, K, -1)     # y_expand: NT by K by D
+    diff = y_expand - mean # diff: NT by K by D
+
+    mahal = torch.sum((diff**2) / (sigma + 1e-8), dim=2) # mahal: NT by K by D
     log_det = torch.sum(torch.log(sigma + 1e-8), dim=2)
-    log_prob = -0.5 * (D * np.log(2*np.pi) + log_det + mahal)
-    weighted = pi * torch.exp(log_prob)
-    total_prob = torch.sum(weighted, dim=1)
-    nll = -torch.sum(torch.log(total_prob + 1e-12))
+    log_prob = -0.5 * (D * np.log(2*np.pi) + log_det + mahal)  # log_prob:  NT by K
+    weighted = pi * torch.exp(log_prob) # pi: NT by K
+    total_prob = torch.sum(weighted, dim=1) # NT by 1
+    # print("y_expand:",y_expand.shape, " mean:", mean.shape, "sigma: ", sigma.shape, "diff: ", diff.shape, "mahal: ", mahal.shape, "log_det: ", log_det.shape, "log_prob: ", log_prob.shape, "total_prob: ", total_prob.shape, "pi: ", pi.shape)
+    nll = -torch.sum(torch.log(total_prob + 1e-12)) # scalar
     return nll
+
+
 
 
 ##################
@@ -87,11 +83,11 @@ class CPD(nn.Module):
         sigma = F.softplus(self.l3_sigma(output)).reshape(-1, self.K, self.D) + 1e-6
         return pi, mean, sigma
 
-    def infer_z(self, x, z, y, mu_repeat, args, y_mean=None, y_std=None):
+    def infer_z(self, x, z, y, mu_repeat, args):
         for k in range(args.langevin_K):
             z = z.detach().clone().requires_grad_(True)
             pi, mean, sigma = self.forward(x, z)
-            nll = mixture_of_gaussians_loss(y, pi, mean, sigma, y_mean, y_std)
+            nll = mixture_of_gaussians_loss(y, pi, mean, sigma)
             z_grad_nll = torch.autograd.grad(nll, z)[0]
             noise = torch.randn_like(z).to(z.device)
             z = z + args.langevin_s * (-z_grad_nll - (z - mu_repeat)) \
@@ -207,7 +203,7 @@ class CPD(nn.Module):
 #     avg_delta = np.mean(delta_mu_list, axis=0) if delta_mu_list else delta_mu
 #     return evaluation(avg_delta, args)
 
-# This is for using SNR for delta mu and return the best one
+# This is for using kurtosis for delta mu and return the best one
 def learn_one_seq_penalty(args, x_input_train, y_input_train,
                      x_input_test, y_input_test, penalty, half):
     """
@@ -226,9 +222,6 @@ def learn_one_seq_penalty(args, x_input_train, y_input_train,
     T = x_input_train.shape[0] // args.num_samples
     dev = x_input_train.device
 
-    # === y-scaling statistics ===
-    y_mean = y_input_train.mean(dim=0) if args.scale_y else None
-    y_std = y_input_train.std(dim=0) + 1e-8 if args.scale_y else None
 
     ones_col = torch.ones(T, 1, device=dev)
     X = torch.zeros(T, T - 1, device=dev)
@@ -250,7 +243,7 @@ def learn_one_seq_penalty(args, x_input_train, y_input_train,
         mu_repeat = mu.repeat_interleave(m, dim=0)
         init_z = torch.randn(T * m, d, device=dev)
         sampled_z_all = model.infer_z(
-            x_input_train, init_z, y_input_train, mu_repeat, args, y_mean, y_std
+            x_input_train, init_z, y_input_train, mu_repeat, args
         )
 
         expected_z = sampled_z_all.clone().reshape(T, m, d).mean(dim=1)
@@ -262,7 +255,7 @@ def learn_one_seq_penalty(args, x_input_train, y_input_train,
             optimizer.zero_grad()
             pi, mean, sigma = model(x_input_train, sampled_z_all)
             loss_train = mixture_of_gaussians_loss(
-                y_input_train, pi, mean, sigma, y_mean, y_std
+                y_input_train, pi, mean, sigma
             ) / m
             loss_train.backward()
             nn.utils.clip_grad_norm_(model.parameters(), 1)
@@ -294,15 +287,16 @@ def learn_one_seq_penalty(args, x_input_train, y_input_train,
         nu = torch.mm(ones_col, gamma) + torch.mm(X, beta)
         w = mu - nu + w
 
-        # === Δμ & kurtosis ===
-        delta_mu = torch.norm(torch.diff(mu, dim=0), p=2, dim=1).cpu().numpy()
-        mean_val = np.mean(delta_mu)
-        var_val = np.var(delta_mu) + 1e-8
-        kurt = np.mean((delta_mu - mean_val)**4) / (var_val**2)
+        # === Δμ & kurtosis (fully GPU, no CPU sync) ===
+        delta_mu = torch.norm(torch.diff(mu, dim=0), p=2, dim=1)  # stay on GPU
 
-        kurt_list.append(kurt)
-        mu_all.append(mu.clone().detach()) 
-        delta_mu_all.append(delta_mu)
+        mean_val = torch.mean(delta_mu)
+        var_val = torch.var(delta_mu, unbiased=False) + 1e-8
+        kurt = torch.mean((delta_mu - mean_val) ** 4) / (var_val ** 2)
+
+        kurt_list.append(kurt.item())              # only extract scalar (no sync storm)
+        mu_all.append(mu.detach().clone())         # stay on GPU until later
+        delta_mu_all.append(delta_mu.detach().cpu().numpy())  # move once per epoch
 
         if (learn_iter + 1) % 5 == 0 or learn_iter == args.epoch - 1:
             print(f"Epoch {learn_iter+1:3d} | Loss={loss_train.item():.6f} | Kurtosis={kurt:.6f}",
@@ -318,7 +312,7 @@ def learn_one_seq_penalty(args, x_input_train, y_input_train,
         with torch.no_grad():
             pi_test, mean_test, sigma_test = model(x_input_test, z_test)
             val_loss = mixture_of_gaussians_loss(
-                y_input_test, pi_test, mean_test, sigma_test, y_mean, y_std
+                y_input_test, pi_test, mean_test, sigma_test
             ) / m
 
         print(f"[CV] Best epoch = {best_idx+1}, Kurtosis = {kurt_list[best_idx]:.6f}, "
