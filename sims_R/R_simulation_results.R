@@ -4,7 +4,7 @@ library(changepoint.np)
 library(strucchange)
 library(bcp)
 
-true_CP <- c(100, 200)
+true_CP <- c(101, 201)
 reps <- 50
 results_list <- vector("list", reps)
 
@@ -108,18 +108,31 @@ for (rep in 1:reps) {
 
 
   ## Method 1: ecp
-  res_ecp <- e.divisive(matrix(resid_norm, ncol = 1), R = 499)
+  resid_t <- t(sapply(1:T, function(t) {
+  idx <- which(time_index == t)
+  colMeans(residuals_mat[idx, , drop = FALSE]) 
+  }))
+  dim(resid_t)
+
+  res_ecp <- e.divisive(resid_t, R = 999, sig.lvl = 0.01)
   est_cp_ecp <- res_ecp$estimates[-c(1, length(res_ecp$estimates))]
   eva_ecp <- evaluate_change_points(est_cp_ecp, true_CP, T)
   eva_ecp["rep"] <- rep; eva_ecp["method"] <- "ecp"
   eva_ecp$est_CP <- as.character(eva_ecp$est_CP)
-
+  eva_ecp
   ## Method 2: changepoint.np
-  cpt_res <- cpt.np(resid_norm, method = "PELT")
+  cpt_res <- cpt.np(
+    resid_norm,
+    method = "PELT",
+    penalty = "Manual",
+    pen.value = 10 * log(N), 
+    minseglen = 10
+  )
   est_cp_cpt <- cpt_res@cpts[-length(cpt_res@cpts)] + 1
   eva_cpt <- evaluate_change_points(est_cp_cpt, true_CP, T)
   eva_cpt["rep"] <- rep; eva_cpt["method"] <- "nonpar"
   eva_cpt$est_CP <- as.character(eva_cpt$est_CP)
+  eva_cpt
 
   ## Method 3: strucchange
   bp <- breakpoints(resid_norm ~ 1)
@@ -128,36 +141,32 @@ for (rep in 1:reps) {
   eva_bp["rep"] <- rep; eva_bp["method"] <- "bp"
   eva_bp$est_CP <- as.character(eva_bp$est_CP)
 
+
   ## Method 4: Bayesian
-  fit_bcp <- bcp(resid_norm, burnin = 500, mcmc = 5000)
-  bcp_est_CP <- which(fit_bcp$posterior.prob > 0.8) + 1
+  fit_bcp <- bcp(resid_norm, burnin = 1000, mcmc = 10000, p0 = 0.00001)
+  bcp_est_CP <- which(fit_bcp$posterior.prob > 0.999) + 1
   eva_bcp <- evaluate_change_points(bcp_est_CP, true_CP, T)
   eva_bcp["rep"] <- rep; eva_bcp["method"] <- "bcp"
   eva_bcp$est_CP <- as.character(eva_bcp$est_CP)
-
-
+  eva_bcp
   results_list[[rep]] <- rbind(eva_ecp, eva_cpt, eva_bp, eva_bcp)
 }
 
 df_results <- do.call(rbind, results_list)
-df_clean <- df_results[, c("method", "FP", "FN", "abs_error", "covering_metric")]
+df_clean <- df_results[, c(
+  "method", "FP", "FN", "abs_error",
+  "dist_est_gt", "dist_gt_est",
+  "covering_metric"
+)]
 
 write.csv(df_clean, "./sims_R/R_sims_summary.csv", row.names = FALSE)
 
 print(head(df_clean))
-
-# summary_df <- aggregate(
-#   cbind(FP, FN, abs_error, covering_metric) ~ method,
-#   data = df_results,
-#   FUN = mean,
-#   na.rm = TRUE
-# )
-
-
-# summary_df
-# df_results[which(df_results$method == "ecp"),]
-
-
-
-
+summary_df <- aggregate(
+  cbind(FP, FN, abs_error, dist_est_gt, dist_gt_est, covering_metric) ~ method,
+  data = df_clean,
+  FUN = mean,
+  na.rm = TRUE
+)
+print(summary_df)
 
