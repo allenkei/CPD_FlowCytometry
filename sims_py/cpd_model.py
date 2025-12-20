@@ -39,19 +39,41 @@ def parse_args():
 ##################
 # LOSS FUNCTION  #
 ##################
-def mixture_of_gaussians_loss(y, pi, mean, sigma):
-    N, K, D = mean.shape
-    y_expand = y.unsqueeze(1).expand(-1, K, -1)     # y_expand: NT by K by D
-    diff = y_expand - mean # diff: NT by K by D
+def mixture_of_gaussians_loss(y, pi, mean, sigma, weights=None):
+    """
+    y       : (NT, D)
+    pi      : (NT, K)
+    mean    : (NT, K, D)
+    sigma   : (NT, K, D)
+    weights : None or (NT,) or (T, N)
+    """
 
-    mahal = torch.sum((diff**2) / (sigma + 1e-8), dim=2) # mahal: NT by K by D
+    NT, K, D = mean.shape
+
+    y_expand = y.unsqueeze(1).expand(-1, K, -1)
+    diff = y_expand - mean
+
+    mahal = torch.sum((diff ** 2) / (sigma + 1e-8), dim=2)
     log_det = torch.sum(torch.log(sigma + 1e-8), dim=2)
-    log_prob = -0.5 * (D * np.log(2*np.pi) + log_det + mahal)  # log_prob:  NT by K
-    weighted = pi * torch.exp(log_prob) # pi: NT by K
-    total_prob = torch.sum(weighted, dim=1) # NT by 1
-    # print("y_expand:",y_expand.shape, " mean:", mean.shape, "sigma: ", sigma.shape, "diff: ", diff.shape, "mahal: ", mahal.shape, "log_det: ", log_det.shape, "log_prob: ", log_prob.shape, "total_prob: ", total_prob.shape, "pi: ", pi.shape)
-    nll = -torch.sum(torch.log(total_prob + 1e-12)) # scalar
+
+    log_prob = -0.5 * (
+        D * np.log(2 * np.pi) + log_det + mahal
+    )  # (NT, K)
+
+    log_mix = torch.logsumexp(
+        torch.log(pi + 1e-12) + log_prob, dim=1
+    )  # (NT,)
+
+    # === weighted / unweighted switch ===
+    if weights is not None:
+        if weights.dim() == 2:
+            weights = weights.reshape(-1)   # (T,N) -> (NT,)
+        nll = -torch.sum(weights * log_mix)
+    else:
+        nll = -torch.sum(log_mix)
+
     return nll
+
 
 
 
@@ -83,11 +105,17 @@ class CPD(nn.Module):
         sigma = F.softplus(self.l3_sigma(output)).reshape(-1, self.K, self.D) + 1e-6
         return pi, mean, sigma
 
-    def infer_z(self, x, z, y, mu_repeat, args):
+    def infer_z(self, x, z, y, mu_repeat, args, weights=None):
         for k in range(args.langevin_K):
             z = z.detach().clone().requires_grad_(True)
             pi, mean, sigma = self.forward(x, z)
-            nll = mixture_of_gaussians_loss(y, pi, mean, sigma)
+            nll = mixture_of_gaussians_loss(
+                    y,
+                    pi,
+                    mean,
+                    sigma,
+                    weights=weights,
+                )
             z_grad_nll = torch.autograd.grad(nll, z)[0]
             noise = torch.randn_like(z).to(z.device)
             z = z + args.langevin_s * (-z_grad_nll - (z - mu_repeat)) \
@@ -204,29 +232,46 @@ class CPD(nn.Module):
 #     return evaluation(avg_delta, args)
 
 # This is for using kurtosis for delta mu and return the best one
-def learn_one_seq_penalty(args, x_input_train, y_input_train,
-                     x_input_test, y_input_test, penalty, half):
+def learn_one_seq_penalty(
+    args,
+    x_input_train,
+    y_input_train,
+    x_input_test,
+    y_input_test,
+    penalty,
+    half,
+    weights_train=None,
+    weights_test=None,
+):
     """
-    One sequence learning with given penalty.
-    - half=True : cross-validation (for λ selection)
-        Train on train set; record kurtosis each epoch;
-        pick epoch with max kurtosis and compute test LLH
-        using mu as z (no re-inference).
-    - half=False: full training (for final model)
-        Select epoch with max kurtosis and evaluate Δμ.
+    One sequence learning with optional observation weights.
+
+    weights_train / weights_test:
+        None or tensor of shape (T, N) or (T*N,)
     """
 
     m = args.num_samples
     kappa = args.kappa
     d = args.z_dim
-    T = x_input_train.shape[0] // args.num_samples
+    T = x_input_train.shape[0] // m
     dev = x_input_train.device
 
+    # ---- reshape weights if provided ----
+    if weights_train is not None:
+        weights_train = weights_train.to(dev)
+        if weights_train.dim() == 2:
+            weights_train = weights_train.reshape(-1)
 
+    if weights_test is not None:
+        weights_test = weights_test.to(dev)
+        if weights_test.dim() == 2:
+            weights_test = weights_test.reshape(-1)
+
+    # ---- ADMM design matrices ----
     ones_col = torch.ones(T, 1, device=dev)
     X = torch.zeros(T, T - 1, device=dev)
     i, j = torch.tril_indices(T, T - 1, offset=-1)
-    X[i, j] = 1  # Group Fused Lasso design
+    X[i, j] = 1
 
     mu = torch.zeros(T, d, device=dev)
     nu = torch.zeros(T, d, device=dev)
@@ -236,32 +281,47 @@ def learn_one_seq_penalty(args, x_input_train, y_input_train,
     model.apply(init_weights)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.decoder_lr)
 
-    delta_mu_all, kurt_list, mu_all = [], [], []
+    delta_mu_all = []
+    kurt_list = []
+    mu_all = []
 
     for learn_iter in range(args.epoch):
 
+        # ===== Langevin inference (NO weights) =====
         mu_repeat = mu.repeat_interleave(m, dim=0)
         init_z = torch.randn(T * m, d, device=dev)
+
         sampled_z_all = model.infer_z(
-            x_input_train, init_z, y_input_train, mu_repeat, args
+            x_input_train,
+            init_z,
+            y_input_train,
+            mu_repeat,
+            args,
+            weights = weights_train            
         )
 
-        expected_z = sampled_z_all.clone().reshape(T, m, d).mean(dim=1)
+        expected_z = sampled_z_all.reshape(T, m, d).mean(dim=1)
         mu = (expected_z + kappa * (nu - w)) / (1.0 + kappa)
         mu = mu.detach().clone()
 
-        # === Decoder training ===
+        # ===== Decoder training (WITH optional weights) =====
         for _ in range(args.decoder_iteration):
             optimizer.zero_grad()
+
             pi, mean, sigma = model(x_input_train, sampled_z_all)
             loss_train = mixture_of_gaussians_loss(
-                y_input_train, pi, mean, sigma
+                y_input_train,
+                pi,
+                mean,
+                sigma,
+                weights=weights_train,
             ) / m
+
             loss_train.backward()
-            nn.utils.clip_grad_norm_(model.parameters(), 1)
+            nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
 
-        # === ADMM updates ===
+        # ===== ADMM updates =====
         gamma = nu[0, :].unsqueeze(0)
         beta = torch.diff(nu, dim=0)
 
@@ -271,63 +331,84 @@ def learn_one_seq_penalty(args, x_input_train, y_input_train,
                 X_without_t = X.clone()
                 beta_without_t[t, :] = 0
                 X_without_t[:, t] = 0
+
                 bt = kappa * torch.mm(
                     X[:, t].unsqueeze(0),
-                    mu + w - torch.mm(ones_col, gamma) - torch.mm(X_without_t, beta_without_t),
+                    mu + w
+                    - torch.mm(ones_col, gamma)
+                    - torch.mm(X_without_t, beta_without_t),
                 )
+
                 bt_norm = torch.norm(bt, p=2)
                 if bt_norm < penalty:
                     beta[t, :] = 0
                 else:
                     beta[t, :] = (
-                        1 / (kappa * torch.norm(X[:, t], p=2) ** 2)
-                    ) * (1 - penalty / bt_norm) * bt
+                        (1.0 / (kappa * torch.norm(X[:, t], p=2) ** 2))
+                        * (1 - penalty / bt_norm)
+                        * bt
+                    )
+
             gamma = torch.mean(mu + w - torch.mm(X, beta), dim=0).unsqueeze(0)
 
         nu = torch.mm(ones_col, gamma) + torch.mm(X, beta)
         w = mu - nu + w
 
-        # === Δμ & kurtosis (fully GPU, no CPU sync) ===
-        delta_mu = torch.norm(torch.diff(mu, dim=0), p=2, dim=1)  # stay on GPU
+        # ===== Δμ & kurtosis (GPU only) =====
+        delta_mu = torch.norm(torch.diff(mu, dim=0), p=2, dim=1)
 
         mean_val = torch.mean(delta_mu)
         var_val = torch.var(delta_mu, unbiased=False) + 1e-8
         kurt = torch.mean((delta_mu - mean_val) ** 4) / (var_val ** 2)
 
-        kurt_list.append(kurt.item())              # only extract scalar (no sync storm)
-        mu_all.append(mu.detach().clone())         # stay on GPU until later
-        delta_mu_all.append(delta_mu.detach().cpu().numpy())  # move once per epoch
+        kurt_list.append(kurt.item())
+        mu_all.append(mu.detach().clone())
+        delta_mu_all.append(delta_mu.detach().cpu().numpy())
 
         if (learn_iter + 1) % 5 == 0 or learn_iter == args.epoch - 1:
-            print(f"Epoch {learn_iter+1:3d} | Loss={loss_train.item():.6f} | Kurtosis={kurt:.6f}",
-                  flush=True)
+            print(
+                f"Epoch {learn_iter+1:3d} | "
+                f"Loss={loss_train.item():.6f} | "
+                f"Kurtosis={kurt.item():.6f}",
+                flush=True,
+            )
 
-    # === CV stage ===
+    # ===== Cross-validation stage =====
     if half:
         best_idx = int(np.argmax(kurt_list))
         best_mu = mu_all[best_idx]
 
-        # --- use mu as z, directly compute test LLH ---
-        z_test = best_mu.repeat_interleave(m, dim=0)  # no inference
+        z_test = best_mu.repeat_interleave(m, dim=0)
         with torch.no_grad():
             pi_test, mean_test, sigma_test = model(x_input_test, z_test)
             val_loss = mixture_of_gaussians_loss(
-                y_input_test, pi_test, mean_test, sigma_test
+                y_input_test,
+                pi_test,
+                mean_test,
+                sigma_test,
+                weights=weights_test,
             ) / m
 
-        print(f"[CV] Best epoch = {best_idx+1}, Kurtosis = {kurt_list[best_idx]:.6f}, "
-              f"Val Loss = {val_loss.item():.6f}")
+        print(
+            f"[CV] Best epoch = {best_idx+1}, "
+            f"Kurtosis = {kurt_list[best_idx]:.6f}, "
+            f"Val Loss = {val_loss.item():.6f}"
+        )
         return val_loss.item(), penalty
 
-    # === Full-data stage ===
+    # ===== Full-data evaluation =====
     best_idx = int(np.argmax(kurt_list))
-    best_kurt = kurt_list[best_idx]
     best_delta_mu = delta_mu_all[best_idx]
 
-    print(f"\n[Kurtosis-based model selection] Best epoch = {best_idx+1}, Kurtosis = {best_kurt:.6f}\n")
+    print(
+        f"\n[Kurtosis-based model selection] "
+        f"Best epoch = {best_idx+1}, "
+        f"Kurtosis = {kurt_list[best_idx]:.6f}\n"
+    )
 
     result = evaluation(best_delta_mu, args)
     return result, kurt_list, delta_mu_all
+
 
 
 
