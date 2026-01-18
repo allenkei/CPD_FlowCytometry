@@ -284,7 +284,9 @@ def learn_one_seq_penalty(
     delta_mu_all = []
     kurt_list = []
     mu_all = []
-
+    best_kurt = -float("inf")
+    best_mu = None
+    best_model_state = None
     for learn_iter in range(args.epoch):
 
         # ===== Langevin inference (NO weights) =====
@@ -364,7 +366,12 @@ def learn_one_seq_penalty(
         kurt_list.append(kurt.item())
         mu_all.append(mu.detach().clone())
         delta_mu_all.append(delta_mu.detach().cpu().numpy())
-
+        if kurt.item() > best_kurt:
+            best_kurt = kurt.item()
+            best_mu = mu.detach().clone()
+            best_model_state = {
+                k: v.detach().cpu() for k, v in model.state_dict().items()
+            }
         if (learn_iter + 1) % 5 == 0 or learn_iter == args.epoch - 1:
             print(
                 f"Epoch {learn_iter+1:3d} | "
@@ -398,6 +405,7 @@ def learn_one_seq_penalty(
 
     # ===== Full-data evaluation =====
     best_idx = int(np.argmax(kurt_list))
+    best_mu = mu_all[best_idx]                     # (T, d)
     best_delta_mu = delta_mu_all[best_idx]
 
     print(
@@ -407,7 +415,7 @@ def learn_one_seq_penalty(
     )
 
     result = evaluation(best_delta_mu, args)
-    return result, kurt_list, delta_mu_all
+    return result, kurt_list, delta_mu_all, best_mu, best_model_state
 
 
 
