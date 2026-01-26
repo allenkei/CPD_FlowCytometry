@@ -1,12 +1,13 @@
 ############################################################
 # Weighted bootstrap + correct scaling order
 ############################################################
-
+rm(list = ls())
 .libPaths("./sims_R/rlib")
 library(tidyverse)
 set.seed(0)
 
 datobj <- readRDS("MGL1704-hourly-paper-new.RDS")
+datobj$X <- datobj$X[, !colnames(datobj$X) %in% c("b1", "b2"), drop = FALSE]
 
 nsize <- 500
 T <- length(datobj$ylist)
@@ -80,3 +81,4 @@ print(datobj$X[1,])
 
 cat("After scaling (first row):\n")
 print(x_arr_scaled[1,1,])
+
