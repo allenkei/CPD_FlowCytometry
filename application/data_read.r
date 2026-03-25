@@ -55,7 +55,6 @@ for (tt in 1:T) {
 # must match python reshape: X.reshape(T*N, p)
 ############################################################
 
-# DO NOT use byrow=TRUE -- that breaks order!
 X_mat <- matrix(x_arr, nrow = T * nsize, ncol = p, byrow = FALSE)
 
 # scaling
@@ -71,14 +70,3 @@ saveRDS(y_arr,           "y_arr.rds")
 saveRDS(x_arr_scaled,    "x_arr.rds")
 saveRDS(weight_arr,      "weight_arr.rds")
 saveRDS(rownames(datobj$X), "datetime.rds")
-
-############################################################
-# Check order correctness
-############################################################
-# Check a few entries manually
-cat("Before scaling X_arr[1,1,]:\n")
-print(datobj$X[1,])
-
-cat("After scaling (first row):\n")
-print(x_arr_scaled[1,1,])
-
